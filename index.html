@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Connect your Deriv account</title>
+  <title>Signing in</title>
   <style>
-    :root { color-scheme: light dark; --accent: #e8333f; }
+    :root { color-scheme: light dark; }
     body {
       margin: 0; padding: 1.25rem;
       min-height: 100vh; min-height: 100dvh;
@@ -15,84 +15,87 @@
     }
     main { width: 100%; max-width: 24rem; text-align: center; }
     h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 .5rem; }
-    p { margin: 0 0 1.25rem; }
-    button {
-      font: inherit; font-weight: 600;
-      width: 100%; padding: .9rem 1.2rem;
-      border: 0; border-radius: .6rem;
-      background: var(--accent); color: #fff;
+    p { margin: 0 0 1rem; }
+    a { color: inherit; }
+    pre {
+      text-align: left; white-space: pre-wrap; word-break: break-word;
+      font-size: .8rem; padding: .75rem; border-radius: .5rem;
+      background: rgba(127, 127, 127, .15);
+      max-height: 40vh; overflow: auto;
     }
-    button:focus-visible { outline: 3px solid currentColor; outline-offset: 3px; }
-    button:disabled { opacity: .6; }
-    #msg { min-height: 1.5em; margin: 1rem 0 0; font-weight: 600; color: var(--accent); }
   </style>
 </head>
 <body>
   <main>
-    <h1>Connect your Deriv account</h1>
-    <p>You sign in on Deriv. This site never sees your password.</p>
-    <button id="login" type="button">Log in with Deriv</button>
-    <p id="msg" role="alert"></p>
+    <h1 id="title">Signing you in</h1>
+    <p id="msg">One moment.</p>
+    <pre id="out" hidden></pre>
+    <p><a href="/">Back to start</a></p>
   </main>
 
   <script>
-    // ===== The only line you must edit: your App ID from the Deriv dashboard =====
-    const CLIENT_ID = 'YOUR_CLIENT_ID';
-    // ==============================================================================
-
-    const SCOPE = 'trade'; // space-separated, for example 'trade account_manage'
     const $ = (id) => document.getElementById(id);
+    const show = (title, text) => {
+      $('title').textContent = title;
+      $('msg').textContent = text || '';
+    };
 
-    function b64url(bytes) {
-      let s = '';
-      for (const b of bytes) s += String.fromCharCode(b);
-      return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    }
-    const rand = (n) => b64url(crypto.getRandomValues(new Uint8Array(n)));
+    (async () => {
+      const q = new URLSearchParams(location.search);
+      const code = q.get('code');
+      const state = q.get('state');
+      const err = q.get('error');
+      const errDesc = q.get('error_description');
 
-    $('login').addEventListener('click', async () => {
-      const msg = $('msg');
-      msg.textContent = '';
+      // Keep the one-time code out of the address bar and browser history.
+      history.replaceState(null, '', location.pathname);
 
-      if (CLIENT_ID === 'YOUR_CLIENT_ID') {
-        msg.textContent = 'Replace YOUR_CLIENT_ID in index.html with your Deriv App ID.';
-        return;
-      }
-      if (!window.crypto || !crypto.subtle) {
-        msg.textContent = 'Open this site over HTTPS, then try again.';
-        return;
+      if (err) {
+        return show('Login cancelled', errDesc || err);
       }
 
-      $('login').disabled = true;
+      let saved = null;
+      try { saved = JSON.parse(sessionStorage.getItem('deriv_oauth')); } catch (e) { saved = null; }
+      sessionStorage.removeItem('deriv_oauth');
+
+      if (!code || !saved || !state || state !== saved.state) {
+        return show('Login failed', 'This login could not be verified. Go back and start again, in the same browser tab.');
+      }
+
       try {
-        const verifier = rand(48);   // 64-character PKCE code_verifier
-        const state = rand(16);      // random CSRF protection value
-        const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
-        const redirectUri = location.origin + '/callback';
+        const res = await fetch('/api/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            code: code,
+            code_verifier: saved.verifier,
+            client_id: saved.clientId,
+            redirect_uri: saved.redirectUri
+          })
+        });
+        const data = await res.json().catch(() => ({}));
 
-        // Kept for the callback page. sessionStorage survives the trip to Deriv and back in the same tab.
-        sessionStorage.setItem('deriv_oauth', JSON.stringify({
-          verifier: verifier,
-          state: state,
-          clientId: CLIENT_ID,
-          redirectUri: redirectUri
+        if (!res.ok || !data.access_token) {
+          const detail = data.error_description ? ': ' + data.error_description : '';
+          return show('Login failed', (data.error || 'token_error') + detail);
+        }
+
+        // Token lasts about an hour. Kept for this tab only.
+        sessionStorage.setItem('deriv_token', JSON.stringify({
+          token: data.access_token,
+          expiresAt: Date.now() + (data.expires_in || 3600) * 1000
         }));
 
-        const params = new URLSearchParams({
-          response_type: 'code',
-          client_id: CLIENT_ID,
-          redirect_uri: redirectUri,
-          scope: SCOPE,
-          state: state,
-          code_challenge: b64url(new Uint8Array(digest)),
-          code_challenge_method: 'S256'
-        });
-        location.assign('https://auth.deriv.com/oauth2/auth?' + params.toString());
+        show('Connected', 'Your Deriv account is linked. Your accounts:');
+        $('out').hidden = false;
+        $('out').textContent = JSON.stringify(
+          data.accounts !== undefined ? data.accounts : { note: data.accounts_error || 'No account data returned.' },
+          null, 2
+        );
       } catch (e) {
-        $('login').disabled = false;
-        msg.textContent = 'Could not start the login: ' + e.message;
+        show('Login failed', 'Network problem: ' + e.message);
       }
-    });
+    })();
   </script>
 </body>
 </html>
